@@ -1,0 +1,157 @@
+diff --git a/AvnetStarterKitReferenceDesign/app_manifest.json b/AvnetStarterKitReferenceDesign/app_manifest.json
+index bae63f1..93cb7af 100644
+--- a/AvnetStarterKitReferenceDesign/app_manifest.json
++++ b/AvnetStarterKitReferenceDesign/app_manifest.json
+@@ -8,12 +8,12 @@
+     "AllowedConnections": [],
+     "AllowedTcpServerPorts": [],
+     "AllowedUdpServerPorts": [],
+-    "Gpio": [ 0, 4, 5, 8, 9, 10, 12, 13, 34 ],
++    "Gpio": [ 0, 4, 5, 8, 9, 10, 12, 13 ],
+     "Uart": [],
+     "I2cMaster": [ "ISU2" ],
+-    "SpiMaster": [],
++    "SpiMaster": [ "ISU1" ],
+     "WifiConfig": true,
+     "NetworkConfig": false,
+     "SystemTime": false
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/AvnetStarterKitReferenceDesign/build_options.h b/AvnetStarterKitReferenceDesign/build_options.h
+index 2644231..fd651a0 100644
+--- a/AvnetStarterKitReferenceDesign/build_options.h
++++ b/AvnetStarterKitReferenceDesign/build_options.h
+@@ -25,8 +25,8 @@
+ 
+ 
+ // Defines how quickly the accelerator data is read and reported
+-#define ACCEL_READ_PERIOD_SECONDS 1
++#define ACCEL_READ_PERIOD_SECONDS 15
+ #define ACCEL_READ_PERIOD_NANO_SECONDS 0
+ 
+ // Enables I2C read/write debug
+-//#define ENABLE_READ_WRITE_DEBUG
+\ No newline at end of file
++//#define ENABLE_READ_WRITE_DEBUG
+diff --git a/AvnetStarterKitReferenceDesign/connection_strings.h b/AvnetStarterKitReferenceDesign/connection_strings.h
+index 783ea98..ab98917 100644
+--- a/AvnetStarterKitReferenceDesign/connection_strings.h
++++ b/AvnetStarterKitReferenceDesign/connection_strings.h
+@@ -1,4 +1,4 @@
+ #pragma once
+ 
+ // Define your connection string here.  The connection string is required to connect to Azure.
+-#define MY_CONNECTION_STRING ""
++#define MY_CONNECTION_STRING "Get Connection String From IOT hub of Azure"
+diff --git a/AvnetStarterKitReferenceDesign/i2c.c b/AvnetStarterKitReferenceDesign/i2c.c
+index 5da04b5..2b21357 100644
+--- a/AvnetStarterKitReferenceDesign/i2c.c
++++ b/AvnetStarterKitReferenceDesign/i2c.c
+@@ -42,6 +42,8 @@
+ 
+ #include <applibs/log.h>
+ #include <applibs/i2c.h>
++#include <applibs/spi.h>
++#include <soc\mt3620_spis.h>
+ 
+ #include "mt3620_avnet_dev.h"
+ #include "deviceTwin.h"
+@@ -70,6 +72,10 @@ lsm6dso_ctx_t dev_ctx;
+ lps22hh_ctx_t pressure_ctx;
+ bool lps22hhDetected;
+ 
++//SPI operations
++static GPIO_Value_Type csPin;
++static int csPinFd = -1;
++static int spiFd = -1;
+ 
+ //Extern variables
+ int i2cFd = -1;
+@@ -103,6 +109,9 @@ void AccelTimerEventHandler(EventData *eventData)
+ {
+ 	uint8_t reg;
+ 	lps22hh_reg_t lps22hhReg;
++	SPIMaster_Transfer transfer;
++	ssize_t transferredBytes;
++	uint8_t b[2];
+ 
+ #if (defined(IOT_CENTRAL_APPLICATION) || defined(IOT_HUB_APPLICATION))
+ 	static bool firstPass = true;
+@@ -191,7 +200,23 @@ void AccelTimerEventHandler(EventData *eventData)
+ 		Log_Debug("LPS22HH: Temperature  [degC]: Not read!\r\n");
+ 	}
+ 
++	if (SPIMaster_InitTransfers(&transfer, 1) != 0)
++		return -1;
++
++	transfer.flags = SPI_TransferFlags_Read;
++	transfer.readData = b;
++	transfer.length = 2;
++
++	transferredBytes = SPIMaster_TransferSequential(spiFd, &transfer, 1);
++	int val = (b[0] << 8 )| b[1];
++	if (transferredBytes == transfer.length) {
++		Log_Debug("SPI: current     [A] : %.3f(%d)\r\n", val/500.0,val);
++	}
++	else {
++		Log_Debug("SPI: Current     [A] : Not read!\r\n");
++	}
+ 
++	
+ #if (defined(IOT_CENTRAL_APPLICATION) || defined(IOT_HUB_APPLICATION))
+ 
+ 		// We've seen that the first read of the Accelerometer data is garbage.  If this is the first pass
+@@ -206,8 +231,7 @@ void AccelTimerEventHandler(EventData *eventData)
+ 			}
+ 
+ 			// construct the telemetry message
+-			snprintf(pjsonBuffer, JSON_BUFFER_SIZE, "{\"gX\":\"%.4lf\", \"gY\":\"%.4lf\", \"gZ\":\"%.4lf\", \"pressure\": \"%.2f\", \"aX\": \"%4.2f\", \"aY\": \"%4.2f\", \"aZ\": \"%4.2f\"}",
+-				acceleration_mg[0], acceleration_mg[1], acceleration_mg[2], pressure_hPa, angular_rate_dps[0], angular_rate_dps[1], angular_rate_dps[2]);
++			snprintf(pjsonBuffer, JSON_BUFFER_SIZE, "{\"temperature\":\"%.2f\", \"current\":\"%.2f\", \"pressure\": \"%.2f\"}", lps22hhTemperature_degC, val/500.0, pressure_hPa);
+ 
+ 			Log_Debug("\n[Info] Sending telemetry: %s\n", pjsonBuffer);
+ 			AzureIoT_SendMessage(pjsonBuffer);
+@@ -392,6 +416,33 @@ int initI2c(void) {
+ 	} while ((angular_rate_dps[0] != 0.0) || (angular_rate_dps[1] != 0.0) || (angular_rate_dps[2] != 0.0));
+ 
+ 	Log_Debug("LSM6DSO: Calibrating angular rate complete!\n");
++	
++	// SPI init
++	SPIMaster_Config config;
++	int ret = SPIMaster_InitConfig(&config);
++	if (ret != 0) {
++		Log_Debug("ERROR: SPIMaster_InitConfig = %d errno = %s (%d)\n", ret, strerror(errno),
++			errno);
++		return -1;
++	}
++	config.csPolarity = SPI_ChipSelectPolarity_ActiveLow;
++	spiFd = SPIMaster_Open(MT3620_SPI_ISU1, MT3620_SPI_CHIP_SELECT_A, &config);
++	if (spiFd < 0) {
++		Log_Debug("ERROR: SPIMaster_Open: errno=%d (%s)\n", errno, strerror(errno));
++		return -1;
++	}
++
++	result = SPIMaster_SetBusSpeed(spiFd, 400000);
++	if (result != 0) {
++		Log_Debug("ERROR: SPIMaster_SetBusSpeed: errno=%d (%s)\n", errno, strerror(errno));
++		return -1;
++	}
++
++	result = SPIMaster_SetMode(spiFd, SPI_Mode_1);
++	if (result != 0) {
++		Log_Debug("ERROR: SPIMaster_SetMode: errno=%d (%s)\n", errno, strerror(errno));
++		return -1;
++	}
+ 
+ 	// Init the epoll interface to periodically run the AccelTimerEventHandler routine where we read the sensors
+ 
+@@ -414,6 +465,7 @@ int initI2c(void) {
+ void closeI2c(void) {
+ 
+ 	CloseFdAndPrintError(i2cFd, "i2c");
++	CloseFdAndPrintError(spiFd, "spi");
+ 	CloseFdAndPrintError(accelTimerFd, "accelTimer");
+ }
+ 
